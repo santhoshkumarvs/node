@@ -45,16 +45,7 @@ void ReadAndParseTorqueFile(const std::string& path) {
   ParseTorque(*maybe_content);
 }
 
-}  // namespace
-
-void CompileTorque(std::vector<std::string> files,
-                   TorqueCompilerOptions options) {
-  CurrentSourceFile::Scope unknown_source_file_scope(SourceId::Invalid());
-  CurrentAst::Scope ast_scope_;
-  LintErrorStatus::Scope lint_error_status_scope_;
-
-  for (const auto& path : files) ReadAndParseTorqueFile(path);
-
+void CompileCurrentAst(TorqueCompilerOptions options) {
   GlobalContext::Scope global_context(std::move(CurrentAst::Get()));
   if (options.verbose) GlobalContext::SetVerbose();
   if (options.collect_language_server_data) {
@@ -83,6 +74,10 @@ void CompileTorque(std::vector<std::string> files,
     output_header_path = output_directory + "/class-definitions-from-dsl.h";
     implementation_visitor.GenerateClassDefinitions(output_header_path);
 
+    std::string output_source_path =
+        output_directory + "/objects-printer-from-dsl.cc";
+    implementation_visitor.GeneratePrintDefinitions(output_source_path);
+
     for (Namespace* n : GlobalContext::Get().GetNamespaces()) {
       implementation_visitor.EndNamespaceFile(n);
       implementation_visitor.GenerateImplementation(output_directory, n);
@@ -90,6 +85,28 @@ void CompileTorque(std::vector<std::string> files,
   }
 
   if (LintErrorStatus::HasLintErrors()) std::abort();
+}
+
+}  // namespace
+
+void CompileTorque(const std::string& source, TorqueCompilerOptions options) {
+  CurrentSourceFile::Scope no_file_scope(SourceFileMap::AddSource("<torque>"));
+  CurrentAst::Scope ast_scope_;
+  LintErrorStatus::Scope lint_error_status_scope_;
+
+  ParseTorque(source);
+  CompileCurrentAst(options);
+}
+
+void CompileTorque(std::vector<std::string> files,
+                   TorqueCompilerOptions options) {
+  CurrentSourceFile::Scope unknown_source_file_scope(SourceId::Invalid());
+  CurrentAst::Scope ast_scope_;
+  LintErrorStatus::Scope lint_error_status_scope_;
+
+  for (const auto& path : files) ReadAndParseTorqueFile(path);
+
+  CompileCurrentAst(options);
 }
 
 }  // namespace torque

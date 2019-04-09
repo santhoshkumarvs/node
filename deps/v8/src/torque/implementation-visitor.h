@@ -140,7 +140,8 @@ class LocationReference {
 };
 
 struct InitializerResults {
-  std::vector<VisitResult> results;
+  std::vector<Identifier*> names;
+  NameValueMap field_value_map;
 };
 
 template <class T>
@@ -256,15 +257,24 @@ class ImplementationVisitor : public FileVisitor {
  public:
   void GenerateBuiltinDefinitions(std::string& file_name);
   void GenerateClassDefinitions(std::string& file_name);
+  void GeneratePrintDefinitions(std::string& file_name);
 
   VisitResult Visit(Expression* expr);
   const Type* Visit(Statement* stmt);
 
   InitializerResults VisitInitializerResults(
-      const std::vector<Expression*>& expressions);
+      const AggregateType* aggregate,
+      const std::vector<NameAndExpression>& expressions);
+
+  void InitializeFieldFromSpread(VisitResult object, const Field& field,
+                                 const InitializerResults& initializer_results);
 
   size_t InitializeAggregateHelper(
       const AggregateType* aggregate_type, VisitResult allocate_result,
+      const InitializerResults& initializer_results);
+
+  VisitResult AddVariableObjectSize(
+      VisitResult object_size, const ClassType* current_class,
       const InitializerResults& initializer_results);
 
   void InitializeAggregate(const AggregateType* aggregate_type,
@@ -327,6 +337,7 @@ class ImplementationVisitor : public FileVisitor {
   VisitResult Visit(TryLabelExpression* expr);
   VisitResult Visit(StatementExpression* expr);
   VisitResult Visit(NewExpression* expr);
+  VisitResult Visit(SpreadExpression* expr);
 
   const Type* Visit(ReturnStatement* stmt);
   const Type* Visit(GotoStatement* stmt);
@@ -500,6 +511,9 @@ class ImplementationVisitor : public FileVisitor {
   void GenerateBranch(const VisitResult& condition, Block* true_block,
                       Block* false_block);
 
+  typedef std::function<VisitResult()> VisitResultGenerator;
+  void GenerateExpressionBranch(VisitResultGenerator, Block* true_block,
+                                Block* false_block);
   void GenerateExpressionBranch(Expression* expression, Block* true_block,
                                 Block* false_block);
 

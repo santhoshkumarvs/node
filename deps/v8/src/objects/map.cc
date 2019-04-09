@@ -56,6 +56,18 @@ MaybeHandle<JSFunction> Map::GetConstructorFunction(
   return MaybeHandle<JSFunction>();
 }
 
+bool Map::IsMapOfGlobalProxy(Handle<NativeContext> native_context) const {
+  DisallowHeapAllocation no_gc;
+  if (IsJSGlobalProxyMap()) {
+    Object maybe_constructor = GetConstructor();
+    // Detached global proxies have |null| as their constructor.
+    return maybe_constructor.IsJSFunction() &&
+           JSFunction::cast(maybe_constructor).native_context() ==
+               *native_context;
+  }
+  return false;
+}
+
 void Map::PrintReconfiguration(Isolate* isolate, FILE* file, int modify_index,
                                PropertyKind kind,
                                PropertyAttributes attributes) {
@@ -121,6 +133,7 @@ VisitorId Map::GetVisitorId(Map map) {
 
     case FIXED_ARRAY_TYPE:
     case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
+    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
     case HASH_TABLE_TYPE:
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
@@ -1005,9 +1018,10 @@ Map Map::TryUpdateSlow(Isolate* isolate, Map old_map) {
     // Bail out if there were some private symbol transitions mixed up
     // with the integrity level transitions.
     if (!info.has_integrity_level_transition) return Map();
-    // Make sure replay the original elements kind transitions, before
+    // Make sure to replay the original elements kind transitions, before
     // the integrity level transition sets the elements to dictionary mode.
     DCHECK(to_kind == DICTIONARY_ELEMENTS ||
+           to_kind == SLOW_STRING_WRAPPER_ELEMENTS ||
            IsFixedTypedArrayElementsKind(to_kind));
     to_kind = info.integrity_level_source_map->elements_kind();
   }
@@ -1029,8 +1043,10 @@ Map Map::TryUpdateSlow(Isolate* isolate, Map old_map) {
                  .SearchSpecial(info.integrity_level_symbol);
   }
 
-  DCHECK_EQ(old_map->elements_kind(), result->elements_kind());
-  DCHECK_EQ(old_map->instance_type(), result->instance_type());
+  DCHECK_IMPLIES(!result.is_null(),
+                 old_map->elements_kind() == result->elements_kind());
+  DCHECK_IMPLIES(!result.is_null(),
+                 old_map->instance_type() == result->instance_type());
   return result;
 }
 
@@ -1464,7 +1480,7 @@ Handle<Map> Map::RawCopy(Isolate* isolate, Handle<Map> map, int instance_size,
   Handle<Map> result = isolate->factory()->NewMap(
       map->instance_type(), instance_size, TERMINAL_FAST_ELEMENTS_KIND,
       inobject_properties);
-  Handle<Object> prototype(map->prototype(), isolate);
+  Handle<HeapObject> prototype(map->prototype(), isolate);
   Map::SetPrototype(isolate, result, prototype);
   result->set_constructor_or_backpointer(map->GetConstructor());
   result->set_bit_field(map->bit_field());
@@ -1515,12 +1531,9 @@ Handle<Map> Map::Normalize(Isolate* isolate, Handle<Map> fast_map,
                   MaybeObject::FromObject(Smi::kZero));
         STATIC_ASSERT(kDescriptorsOffset ==
                       kTransitionsOrPrototypeInfoOffset + kTaggedSize);
-        DCHECK_EQ(
-            0,
-            memcmp(
-                HeapObject::RawField(*fresh, kDescriptorsOffset).ToVoidPtr(),
-                HeapObject::RawField(*new_map, kDescriptorsOffset).ToVoidPtr(),
-                kDependentCodeOffset - kDescriptorsOffset));
+        DCHECK_EQ(0, memcmp(fresh->RawField(kDescriptorsOffset).ToVoidPtr(),
+                            new_map->RawField(kDescriptorsOffset).ToVoidPtr(),
+                            kDependentCodeOffset - kDescriptorsOffset));
       } else {
         DCHECK_EQ(0, memcmp(reinterpret_cast<void*>(fresh->address()),
                             reinterpret_cast<void*>(new_map->address()),
@@ -2175,7 +2188,7 @@ Handle<Map> Map::TransitionToDataProperty(Isolate* isolate, Handle<Map> map,
       result = Map::Normalize(isolate, initial_map, CLEAR_INOBJECT_PROPERTIES,
                               reason);
       initial_map->DeprecateTransitionTree(isolate);
-      Handle<Object> prototype(result->prototype(), isolate);
+      Handle<HeapObject> prototype(result->prototype(), isolate);
       JSFunction::SetInitialMap(constructor, result, prototype);
 
       // Deoptimize all code that embeds the previous initial map.
@@ -2618,7 +2631,7 @@ bool Map::IsPrototypeChainInvalidated(Map map) {
 
 // static
 void Map::SetPrototype(Isolate* isolate, Handle<Map> map,
-                       Handle<Object> prototype,
+                       Handle<HeapObject> prototype,
                        bool enable_prototype_setup_mode) {
   RuntimeCallTimerScope stats_scope(isolate, *map,
                                     RuntimeCallCounterId::kMap_SetPrototype);
@@ -2640,6 +2653,8 @@ void Map::SetPrototype(Isolate* isolate, Handle<Map> map,
           FunctionTemplateInfo::cast(maybe_constructor)->hidden_prototype() ||
           prototype->IsJSGlobalObject();
     }
+  } else {
+    DCHECK(prototype->IsNull(isolate) || prototype->IsJSProxy());
   }
   map->set_has_hidden_prototype(is_hidden);
 
@@ -2655,7 +2670,7 @@ void Map::StartInobjectSlackTracking() {
 }
 
 Handle<Map> Map::TransitionToPrototype(Isolate* isolate, Handle<Map> map,
-                                       Handle<Object> prototype) {
+                                       Handle<HeapObject> prototype) {
   Handle<Map> new_map =
       TransitionsAccessor(isolate, map).GetPrototypeTransition(prototype);
   if (new_map.is_null()) {
@@ -2669,7 +2684,7 @@ Handle<Map> Map::TransitionToPrototype(Isolate* isolate, Handle<Map> map,
 
 Handle<NormalizedMapCache> NormalizedMapCache::New(Isolate* isolate) {
   Handle<WeakFixedArray> array(
-      isolate->factory()->NewWeakFixedArray(kEntries, TENURED));
+      isolate->factory()->NewWeakFixedArray(kEntries, AllocationType::kOld));
   return Handle<NormalizedMapCache>::cast(array);
 }
 

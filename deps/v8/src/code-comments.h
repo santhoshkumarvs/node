@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "include/v8-internal.h"
+#include "src/base/macros.h"
 
 namespace v8 {
 namespace internal {
@@ -34,7 +35,7 @@ struct CodeCommentEntry {
 
 class CodeCommentsWriter {
  public:
-  void Add(uint32_t pc_offset, std::string comment);
+  V8_EXPORT_PRIVATE void Add(uint32_t pc_offset, std::string comment);
   void Emit(Assembler* assm);
   size_t entry_count() const;
   uint32_t section_size() const;
@@ -44,7 +45,7 @@ class CodeCommentsWriter {
   std::vector<CodeCommentEntry> comments_;
 };
 
-class CodeCommentsIterator {
+class V8_EXPORT_PRIVATE CodeCommentsIterator {
  public:
   // Address can be kNullAddress. In this case HasCurrent() will return false.
   explicit CodeCommentsIterator(Address code_comments_start);

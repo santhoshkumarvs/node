@@ -8,18 +8,23 @@
 #include "src/bailout-reason.h"
 #include "src/function-kind.h"
 #include "src/objects.h"
-#include "src/objects/builtin-function-id.h"
 #include "src/objects/compressed-slots.h"
 #include "src/objects/script.h"
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
 #include "src/objects/struct.h"
+#include "testing/gtest/include/gtest/gtest_prod.h"
 #include "torque-generated/class-definitions-from-dsl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
 namespace v8 {
+
+namespace tracing {
+class TracedValue;
+}
+
 namespace internal {
 
 class AsmWasmData;
@@ -70,16 +75,9 @@ class PreparseData : public HeapObject {
   DECL_PRINTER(PreparseData)
   DECL_VERIFIER(PreparseData)
 
-// Layout description.
-#define PREPARSE_DATA_FIELDS(V)     \
-  V(kDataLengthOffset, kInt32Size)  \
-  V(kInnerLengthOffset, kInt32Size) \
-  /* Header size. */                \
-  V(kDataStartOffset, 0)            \
-  V(kHeaderSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, PREPARSE_DATA_FIELDS)
-#undef PREPARSE_DATA_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize,
+                                TORQUE_GENERATED_PREPARSE_DATA_FIELDS)
+  static const int kDataStartOffset = kSize;
 
   class BodyDescriptor;
 
@@ -134,9 +132,8 @@ class UncompiledData : public HeapObject {
   DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, UNCOMPILED_DATA_FIELDS)
 #undef UNCOMPILED_DATA_FIELDS
 
-  typedef FixedBodyDescriptor<kStartOfPointerFieldsOffset,
-                              kEndOfTaggedFieldsOffset, kSize>
-      BodyDescriptor;
+  using BodyDescriptor = FixedBodyDescriptor<kStartOfPointerFieldsOffset,
+                                             kEndOfTaggedFieldsOffset, kSize>;
 
   // Clear uninitialized padding space.
   inline void clear_padding();
@@ -156,7 +153,7 @@ class UncompiledDataWithoutPreparseData : public UncompiledData {
   static const int kSize = UncompiledData::kSize;
 
   // No extra fields compared to UncompiledData.
-  typedef UncompiledData::BodyDescriptor BodyDescriptor;
+  using BodyDescriptor = UncompiledData::BodyDescriptor;
 
   OBJECT_CONSTRUCTORS(UncompiledDataWithoutPreparseData, UncompiledData);
 };
@@ -195,11 +192,10 @@ class UncompiledDataWithPreparseData : public UncompiledData {
   // Make sure the size is aligned
   STATIC_ASSERT(IsAligned(kSize, kTaggedSize));
 
-  typedef SubclassBodyDescriptor<
+  using BodyDescriptor = SubclassBodyDescriptor<
       UncompiledData::BodyDescriptor,
       FixedBodyDescriptor<kStartOfPointerFieldsOffset, kEndOfTaggedFieldsOffset,
-                          kSize>>
-      BodyDescriptor;
+                          kSize>>;
 
   OBJECT_CONSTRUCTORS(UncompiledDataWithPreparseData, UncompiledData);
 };
@@ -231,14 +227,16 @@ class InterpreterData : public Struct {
 class SharedFunctionInfo : public HeapObject {
  public:
   NEVER_READ_ONLY_SPACE
-  static constexpr Object const kNoSharedNameSentinel = Smi::kZero;
+
+  V8_EXPORT_PRIVATE static constexpr Object const kNoSharedNameSentinel =
+      Smi::kZero;
 
   // [name]: Returns shared name if it exists or an empty string otherwise.
   inline String Name() const;
   inline void SetName(String name);
 
   // Get the code object which represents the execution of this function.
-  Code GetCode() const;
+  V8_EXPORT_PRIVATE Code GetCode() const;
 
   // Get the abstract code associated with the function, which will either be
   // a Code object or a BytecodeArray.
@@ -323,7 +321,7 @@ class SharedFunctionInfo : public HeapObject {
 
   // [expected_nof_properties]: Expected number of properties for the
   // function. The value is only reliable when the function has been compiled.
-  DECL_UINT8_ACCESSORS(expected_nof_properties)
+  DECL_UINT16_ACCESSORS(expected_nof_properties)
 
   // [function data]: This field holds some additional data for function.
   // Currently it has one of:
@@ -356,11 +354,7 @@ class SharedFunctionInfo : public HeapObject {
   inline AsmWasmData asm_wasm_data() const;
   inline void set_asm_wasm_data(AsmWasmData data);
 
-  // A brief note to clear up possible confusion:
-  // builtin_id corresponds to the auto-generated
-  // Builtins::Name id, while builtin_function_id corresponds to
-  // BuiltinFunctionId (a manually maintained list of 'interesting' functions
-  // mainly used during optimization).
+  // builtin_id corresponds to the auto-generated Builtins::Name id.
   inline bool HasBuiltinId() const;
   inline int builtin_id() const;
   inline void set_builtin_id(int builtin_id);
@@ -380,18 +374,6 @@ class SharedFunctionInfo : public HeapObject {
   // turning it into UncompiledDataWithoutPreparseData.
   inline void ClearPreparseData();
 
-  // [raw_builtin_function_id]: The id of the built-in function this function
-  // represents, used during optimization to improve code generation.
-  // TODO(leszeks): Once there are no more JS builtins, this can be replaced
-  // by BuiltinId.
-  DECL_UINT8_ACCESSORS(raw_builtin_function_id)
-  inline bool HasBuiltinFunctionId();
-  inline BuiltinFunctionId builtin_function_id();
-  inline void set_builtin_function_id(BuiltinFunctionId id);
-  // Make sure BuiltinFunctionIds fit in a uint8_t
-  STATIC_ASSERT((std::is_same<std::underlying_type<BuiltinFunctionId>::type,
-                              uint8_t>::value));
-
   // The inferred_name is inferred from variable or property assignment of this
   // function. It is used to facilitate debugging and profiling of JavaScript
   // code written in OO style, where almost all functions are anonymous but are
@@ -404,7 +386,7 @@ class SharedFunctionInfo : public HeapObject {
 
   // Break infos are contained in DebugInfo, this is a convenience method
   // to simplify access.
-  bool HasBreakInfo() const;
+  V8_EXPORT_PRIVATE bool HasBreakInfo() const;
   bool BreakAtEntry() const;
 
   // Coverage infos are contained in DebugInfo, this is a convenience method
@@ -560,8 +542,8 @@ class SharedFunctionInfo : public HeapObject {
 
   // Flush compiled data from this function, setting it back to CompileLazy and
   // clearing any compiled metadata.
-  static void DiscardCompiled(Isolate* isolate,
-                              Handle<SharedFunctionInfo> shared_info);
+  V8_EXPORT_PRIVATE static void DiscardCompiled(
+      Isolate* isolate, Handle<SharedFunctionInfo> shared_info);
 
   // Discard the compiled metadata. If called during GC then
   // |gc_notify_updated_slot| should be used to record any slot updates.
@@ -571,8 +553,10 @@ class SharedFunctionInfo : public HeapObject {
           gc_notify_updated_slot =
               [](HeapObject object, ObjectSlot slot, HeapObject target) {});
 
-  // Returns true if the function has old bytecode that could be flushed.
-  inline bool ShouldFlushBytecode();
+  // Returns true if the function has old bytecode that could be flushed. This
+  // function shouldn't access any flags as it is used by concurrent marker.
+  // Hence it takes the mode as an argument.
+  inline bool ShouldFlushBytecode(BytecodeFlushMode mode);
 
   // Check whether or not this function is inlineable.
   bool IsInlineable();
@@ -601,7 +585,7 @@ class SharedFunctionInfo : public HeapObject {
       Isolate* isolate, Handle<SharedFunctionInfo> shared_info);
 
   // Hash based on function literal id and script id.
-  uint32_t Hash();
+  V8_EXPORT_PRIVATE uint32_t Hash();
 
   inline bool construct_as_builtin() const;
 
@@ -619,13 +603,28 @@ class SharedFunctionInfo : public HeapObject {
   void PrintSourceCode(std::ostream& os);
 #endif
 
+  // Returns the SharedFunctionInfo in a format tracing can support.
+  std::unique_ptr<v8::tracing::TracedValue> ToTracedValue();
+
+  // The tracing scope for SharedFunctionInfo objects.
+  static const char* kTraceScope;
+
+  // Returns the unique TraceID for this SharedFunctionInfo (within the
+  // kTraceScope, works only for functions that have a Script and start/end
+  // position).
+  uint64_t TraceID() const;
+
+  // Returns the unique trace ID reference for this SharedFunctionInfo
+  // (based on the |TraceID()| above).
+  std::unique_ptr<v8::tracing::TracedValue> TraceIDRef() const;
+
   // Iterate over all shared function infos in a given script.
   class ScriptIterator {
    public:
-    ScriptIterator(Isolate* isolate, Script script);
+    V8_EXPORT_PRIVATE ScriptIterator(Isolate* isolate, Script script);
     ScriptIterator(Isolate* isolate,
                    Handle<WeakFixedArray> shared_function_infos);
-    SharedFunctionInfo Next();
+    V8_EXPORT_PRIVATE SharedFunctionInfo Next();
     int CurrentIndex() const { return index_ - 1; }
 
     // Reset the iterator to run on |script|.
@@ -641,8 +640,8 @@ class SharedFunctionInfo : public HeapObject {
   // Iterate over all shared function infos on the heap.
   class GlobalIterator {
    public:
-    explicit GlobalIterator(Isolate* isolate);
-    SharedFunctionInfo Next();
+    V8_EXPORT_PRIVATE explicit GlobalIterator(Isolate* isolate);
+    V8_EXPORT_PRIVATE SharedFunctionInfo Next();
 
    private:
     Script::Iterator script_iterator_;

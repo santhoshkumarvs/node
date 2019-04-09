@@ -84,7 +84,11 @@ void ImplementationVisitor::BeginNamespaceFile(Namespace* nspace) {
          << "namespace internal {\n"
          << "\n";
 
-  header << "class " << nspace->ExternalName() << " {\n";
+  header << "class ";
+  if (nspace->IsTestNamespace()) {
+    header << "V8_EXPORT_PRIVATE ";
+  }
+  header << nspace->ExternalName() << " {\n";
   header << " public:\n";
   header << "  explicit " << nspace->ExternalName()
          << "(compiler::CodeAssemblerState* state) : state_(state), ca_(state) "
@@ -489,21 +493,29 @@ void ImplementationVisitor::Visit(Builtin* builtin) {
     DCHECK(signature.parameter_types.var_args);
     source_out()
         << "  Node* argc = Parameter(Descriptor::kJSActualArgumentsCount);\n";
-    source_out() << "  CodeStubArguments arguments_impl(this, "
-                    "ChangeInt32ToIntPtr(argc));\n";
     std::string parameter1 = AddParameter(
         1, builtin, &parameters, &parameter_types, &parameter_bindings);
+    source_out()
+        << "  TNode<IntPtrT> arguments_length(ChangeInt32ToIntPtr(argc));\n";
+    source_out() << "  TNode<RawPtrT> arguments_frame = "
+                    "UncheckedCast<RawPtrT>(LoadFramePointer());\n";
+    source_out() << "  BaseBuiltinsFromDSLAssembler::Arguments "
+                    "torque_arguments(GetFrameArguments(arguments_frame, "
+                    "arguments_length));\n";
+    source_out() << "  CodeStubArguments arguments(this, torque_arguments);\n";
 
     source_out() << "  TNode<Object> " << parameter1
-                 << " = arguments_impl.GetReceiver();\n";
-    source_out() << "auto " << CSAGenerator::ARGUMENTS_VARIABLE_STRING
-                 << " = &arguments_impl;\n";
-    source_out() << "USE(arguments);\n";
+                 << " = arguments.GetReceiver();\n";
     source_out() << "USE(" << parameter1 << ");\n";
+    parameters.Push("torque_arguments.frame");
+    parameters.Push("torque_arguments.base");
+    parameters.Push("torque_arguments.length");
+    const Type* arguments_type = TypeOracle::GetArgumentsType();
+    StackRange range = parameter_types.PushMany(LowerType(arguments_type));
     parameter_bindings.Add(
         *signature.arguments_variable,
-        LocalValue{true,
-                   VisitResult(TypeOracle::GetArgumentsType(), "arguments")});
+        LocalValue{true, VisitResult(arguments_type, range)});
+
     first = 2;
   }
 
@@ -568,7 +580,7 @@ const Type* ImplementationVisitor::Visit(
     TypeVector lowered_types = LowerType(*type);
     for (const Type* type : lowered_types) {
       assembler().Emit(PushUninitializedInstruction{TypeOracle::GetTopType(
-          "unitialized variable '" + stmt->name->value + "' of type " +
+          "uninitialized variable '" + stmt->name->value + "' of type " +
               type->ToString() + " originally defined at " +
               PositionAsString(stmt->pos),
           type)});
@@ -1149,7 +1161,7 @@ VisitResult ImplementationVisitor::TemporaryUninitializedStruct(
       range.Extend(
           TemporaryUninitializedStruct(struct_type, reason).stack_range());
     } else {
-      std::string descriptor = "unitialized field '" + f.name_and_type.name +
+      std::string descriptor = "uninitialized field '" + f.name_and_type.name +
                                "' declared at " + PositionAsString(f.pos) +
                                " (" + reason + ")";
       TypeVector lowered_types = LowerType(f.name_and_type.type);
@@ -1242,10 +1254,28 @@ VisitResult ImplementationVisitor::Visit(StatementExpression* expr) {
 }
 
 InitializerResults ImplementationVisitor::VisitInitializerResults(
-    const std::vector<Expression*>& expressions) {
+    const AggregateType* current_aggregate,
+    const std::vector<NameAndExpression>& initializers) {
   InitializerResults result;
-  for (auto e : expressions) {
-    result.results.push_back(Visit(e));
+  for (const NameAndExpression& initializer : initializers) {
+    result.names.push_back(initializer.name);
+    Expression* e = initializer.expression;
+    const Field& field =
+        current_aggregate->LookupField(initializer.name->value);
+    auto field_index = field.index;
+    if (SpreadExpression* s = SpreadExpression::DynamicCast(e)) {
+      if (!field_index) {
+        ReportError(
+            "spread expressions can only be used to initialize indexed class "
+            "fields ('",
+            initializer.name->value, "' is not)");
+      }
+      e = s->spreadee;
+    } else if (field_index) {
+      ReportError("the indexed class field '", initializer.name->value,
+                  "' must be initialized with a spread operator");
+    }
+    result.field_value_map[field.name_and_type.name] = Visit(e);
   }
   return result;
 }
@@ -1263,18 +1293,29 @@ size_t ImplementationVisitor::InitializeAggregateHelper(
     }
   }
 
-  for (auto f : aggregate_type->fields()) {
-    if (current == initializer_results.results.size()) {
+  for (Field f : aggregate_type->fields()) {
+    if (current == initializer_results.field_value_map.size()) {
       ReportError("insufficient number of initializers for ",
                   aggregate_type->name());
     }
-    VisitResult current_value = initializer_results.results[current];
+    VisitResult current_value =
+        initializer_results.field_value_map.at(f.name_and_type.name);
+    Identifier* fieldname = initializer_results.names[current];
+    if (fieldname->value != f.name_and_type.name) {
+      CurrentSourcePosition::Scope scope(fieldname->pos);
+      ReportError("Expected fieldname \"", f.name_and_type.name,
+                  "\" instead of \"", fieldname->value, "\"");
+    }
     if (aggregate_type->IsClassType()) {
-      allocate_result.SetType(aggregate_type);
-      GenerateCopy(allocate_result);
-      GenerateImplicitConvert(f.name_and_type.type, current_value);
-      assembler().Emit(StoreObjectFieldInstruction(
-          ClassType::cast(aggregate_type), f.name_and_type.name));
+      if (f.index) {
+        InitializeFieldFromSpread(allocate_result, f, initializer_results);
+      } else {
+        allocate_result.SetType(aggregate_type);
+        GenerateCopy(allocate_result);
+        GenerateImplicitConvert(f.name_and_type.type, current_value);
+        assembler().Emit(StoreObjectFieldInstruction(
+            ClassType::cast(aggregate_type), f.name_and_type.name));
+      }
     } else {
       LocationReference struct_field_ref = LocationReference::VariableAccess(
           ProjectStructField(allocate_result, f.name_and_type.name));
@@ -1285,15 +1326,111 @@ size_t ImplementationVisitor::InitializeAggregateHelper(
   return current;
 }
 
+void ImplementationVisitor::InitializeFieldFromSpread(
+    VisitResult object, const Field& field,
+    const InitializerResults& initializer_results) {
+  StackScope stack_scope(this);
+
+  VisitResult zero(TypeOracle::GetConstInt31Type(), "0");
+  const Type* index_type = (*field.index)->name_and_type.type;
+  VisitResult index = GenerateImplicitConvert(index_type, zero);
+  Block* post_exit_block = assembler().NewBlock(assembler().CurrentStack());
+  Block* exit_block = assembler().NewBlock(assembler().CurrentStack());
+  Block* body_block = assembler().NewBlock(assembler().CurrentStack());
+  Block* fail_block = assembler().NewBlock(assembler().CurrentStack(), true);
+  Block* header_block = assembler().NewBlock(assembler().CurrentStack());
+
+  assembler().Goto(header_block);
+
+  assembler().Bind(header_block);
+  Arguments compare_arguments;
+  compare_arguments.parameters.push_back(index);
+  compare_arguments.parameters.push_back(initializer_results.field_value_map.at(
+      (*field.index)->name_and_type.name));
+  GenerateExpressionBranch(
+      [&]() { return GenerateCall("<", compare_arguments); }, body_block,
+      exit_block);
+
+  assembler().Bind(body_block);
+  {
+    VisitResult spreadee =
+        initializer_results.field_value_map.at(field.name_and_type.name);
+    LocationReference target = LocationReference::VariableAccess(spreadee);
+    Binding<LocalLabel> no_more{&LabelBindingsManager::Get(), "_Done",
+                                LocalLabel{fail_block}};
+
+    // Call the Next() method of the iterator
+    Arguments next_arguments;
+    next_arguments.labels.push_back(&no_more);
+    Callable* callable = LookupMethod("Next", target, next_arguments, {});
+    VisitResult next_result =
+        GenerateCall(callable, target, next_arguments, {}, false);
+    Arguments assign_arguments;
+    assign_arguments.parameters.push_back(object);
+    assign_arguments.parameters.push_back(index);
+    assign_arguments.parameters.push_back(next_result);
+    GenerateCall("[]=", assign_arguments);
+
+    // Increment the indexed field index.
+    LocationReference index_ref = LocationReference::VariableAccess(index);
+    Arguments increment_arguments;
+    VisitResult one = {TypeOracle::GetConstInt31Type(), "1"};
+    increment_arguments.parameters = {index, one};
+    VisitResult assignment_value = GenerateCall("+", increment_arguments);
+    GenerateAssignToLocation(index_ref, assignment_value);
+  }
+  assembler().Goto(header_block);
+
+  assembler().Bind(fail_block);
+  assembler().Emit(AbortInstruction(AbortInstruction::Kind::kUnreachable));
+
+  assembler().Bind(exit_block);
+  assembler().Goto(post_exit_block);
+
+  assembler().Bind(post_exit_block);
+}
+
 void ImplementationVisitor::InitializeAggregate(
     const AggregateType* aggregate_type, VisitResult allocate_result,
     const InitializerResults& initializer_results) {
   size_t consumed_initializers = InitializeAggregateHelper(
       aggregate_type, allocate_result, initializer_results);
-  if (consumed_initializers != initializer_results.results.size()) {
+  if (consumed_initializers != initializer_results.field_value_map.size()) {
     ReportError("more initializers than fields present in ",
                 aggregate_type->name());
   }
+}
+
+VisitResult ImplementationVisitor::AddVariableObjectSize(
+    VisitResult object_size, const ClassType* current_class,
+    const InitializerResults& initializer_results) {
+  while (current_class != nullptr) {
+    auto current_field = current_class->fields().begin();
+    while (current_field != current_class->fields().end()) {
+      if (current_field->index) {
+        if (!current_field->name_and_type.type->IsSubtypeOf(
+                TypeOracle::GetObjectType())) {
+          ReportError(
+              "allocating objects containing indexed fields of non-object "
+              "types is not yet supported");
+        }
+        VisitResult index_field_size =
+            VisitResult(TypeOracle::GetConstInt31Type(), "kTaggedSize");
+        VisitResult initializer_value = initializer_results.field_value_map.at(
+            (*current_field->index)->name_and_type.name);
+        VisitResult index_intptr_size =
+            GenerateCall("Convert", {{initializer_value}, {}},
+                         {TypeOracle::GetIntPtrType()}, false);
+        VisitResult variable_size = GenerateCall(
+            "*", {{index_intptr_size, index_field_size}, {}}, {}, false);
+        object_size =
+            GenerateCall("+", {{object_size, variable_size}, {}}, {}, false);
+      }
+      ++current_field;
+    }
+    current_class = current_class->GetSuperClass();
+  }
+  return object_size;
 }
 
 VisitResult ImplementationVisitor::Visit(NewExpression* expr) {
@@ -1312,21 +1449,27 @@ VisitResult ImplementationVisitor::Visit(NewExpression* expr) {
   }
 
   InitializerResults initializer_results =
-      VisitInitializerResults(expr->parameters);
+      VisitInitializerResults(class_type, expr->initializers);
 
-  // Output the code to generate an unitialized object of the class size in the
-  // GC heap.
+  // Output the code to generate an uninitialized object of the class size in
+  // the GC heap.
   VisitResult allocate_result;
   if (class_type->IsExtern()) {
-    if (initializer_results.results.size() == 0) {
+    const Field& map_field = class_type->LookupField("map");
+    if (map_field.offset != 0) {
       ReportError(
           "external classes initializers must have a map as first parameter");
     }
-    VisitResult object_map = initializer_results.results[0];
+    VisitResult object_map =
+        initializer_results.field_value_map[map_field.name_and_type.name];
     Arguments size_arguments;
     size_arguments.parameters.push_back(object_map);
     VisitResult object_size = GenerateCall("%GetAllocationBaseSize",
                                            size_arguments, {class_type}, false);
+
+    object_size =
+        AddVariableObjectSize(object_size, class_type, initializer_results);
+
     Arguments allocate_arguments;
     allocate_arguments.parameters.push_back(object_size);
     allocate_result =
@@ -1415,6 +1558,12 @@ const Type* ImplementationVisitor::Visit(ForLoopStatement* stmt) {
 
   assembler().Bind(exit_block);
   return TypeOracle::GetVoidType();
+}
+
+VisitResult ImplementationVisitor::Visit(SpreadExpression* expr) {
+  ReportError(
+      "spread operators are only currently supported in indexed class field "
+      "initialization expressions");
 }
 
 void ImplementationVisitor::GenerateImplementation(const std::string& dir,
@@ -1684,21 +1833,20 @@ VisitResult ImplementationVisitor::GenerateCopy(const VisitResult& to_copy) {
   return to_copy;
 }
 
-VisitResult ImplementationVisitor::Visit(StructExpression* decl) {
+VisitResult ImplementationVisitor::Visit(StructExpression* expr) {
   StackScope stack_scope(this);
-  const Type* raw_type = Declarations::LookupType(
-      QualifiedName(decl->namespace_qualification, decl->name));
+  const Type* raw_type = Declarations::GetType(expr->type);
   if (!raw_type->IsStructType()) {
-    std::stringstream s;
-    s << decl->name << " is not a struct but used like one ";
-    ReportError(s.str());
+    ReportError(*raw_type, " is not a struct but used like one");
   }
 
-  InitializerResults initialization_results =
-      ImplementationVisitor::VisitInitializerResults(decl->expressions);
-
   const StructType* struct_type = StructType::cast(raw_type);
-  // Push unitialized 'this'
+
+  InitializerResults initialization_results =
+      ImplementationVisitor::VisitInitializerResults(struct_type,
+                                                     expr->initializers);
+
+  // Push uninitialized 'this'
   VisitResult result = TemporaryUninitializedStruct(
       struct_type, "it's not initialized in the struct " + struct_type->name());
 
@@ -1728,26 +1876,46 @@ LocationReference ImplementationVisitor::GetLocationReference(
   LocationReference reference = GetLocationReference(expr->object);
   if (reference.IsVariableAccess() &&
       reference.variable().type()->IsStructType()) {
-    return LocationReference::VariableAccess(
-        ProjectStructField(reference.variable(), expr->field));
+    const StructType* type = StructType::cast(reference.variable().type());
+    const Field& field = type->LookupField(expr->field->value);
+    if (GlobalContext::collect_language_server_data()) {
+      LanguageServerData::AddDefinition(expr->field->pos, field.pos);
+    }
+    if (field.const_qualified) {
+      VisitResult t_value =
+          ProjectStructField(reference.variable(), expr->field->value);
+      return LocationReference::Temporary(
+          t_value, "for constant field '" + field.name_and_type.name + "'");
+    } else {
+      return LocationReference::VariableAccess(
+          ProjectStructField(reference.variable(), expr->field->value));
+    }
   }
   if (reference.IsTemporary() && reference.temporary().type()->IsStructType()) {
+    if (GlobalContext::collect_language_server_data()) {
+      const StructType* type = StructType::cast(reference.temporary().type());
+      const Field& field = type->LookupField(expr->field->value);
+      LanguageServerData::AddDefinition(expr->field->pos, field.pos);
+    }
     return LocationReference::Temporary(
-        ProjectStructField(reference.temporary(), expr->field),
+        ProjectStructField(reference.temporary(), expr->field->value),
         reference.temporary_description());
   }
   VisitResult object_result = GenerateFetchFromLocation(reference);
   if (const ClassType* class_type =
           ClassType::DynamicCast(object_result.type())) {
-    if (class_type->HasField(expr->field)) {
-      const Field& field = (class_type->LookupField(expr->field));
+    if (class_type->HasField(expr->field->value)) {
+      const Field& field = (class_type->LookupField(expr->field->value));
+      if (GlobalContext::collect_language_server_data()) {
+        LanguageServerData::AddDefinition(expr->field->pos, field.pos);
+      }
       if (field.index) {
         return LocationReference::IndexedFieldAccess(object_result,
-                                                     expr->field);
+                                                     expr->field->value);
       }
     }
   }
-  return LocationReference::FieldAccess(object_result, expr->field);
+  return LocationReference::FieldAccess(object_result, expr->field->value);
 }
 
 LocationReference ImplementationVisitor::GetLocationReference(
@@ -2299,9 +2467,8 @@ void ImplementationVisitor::GenerateBranch(const VisitResult& condition,
   assembler().Branch(true_block, false_block);
 }
 
-void ImplementationVisitor::GenerateExpressionBranch(Expression* expression,
-                                                     Block* true_block,
-                                                     Block* false_block) {
+void ImplementationVisitor::GenerateExpressionBranch(
+    VisitResultGenerator generator, Block* true_block, Block* false_block) {
   // Conditional expressions can either explicitly return a bit
   // type, or they can be backed by macros that don't return but
   // take a true and false label. By declaring the labels before
@@ -2313,12 +2480,19 @@ void ImplementationVisitor::GenerateExpressionBranch(Expression* expression,
   Binding<LocalLabel> false_binding{&LabelBindingsManager::Get(),
                                     kFalseLabelName, LocalLabel{false_block}};
   StackScope stack_scope(this);
-  VisitResult expression_result = Visit(expression);
+  VisitResult expression_result = generator();
   if (!expression_result.type()->IsNever()) {
     expression_result = stack_scope.Yield(
         GenerateImplicitConvert(TypeOracle::GetBoolType(), expression_result));
     GenerateBranch(expression_result, true_block, false_block);
   }
+}
+
+void ImplementationVisitor::GenerateExpressionBranch(Expression* expression,
+                                                     Block* true_block,
+                                                     Block* false_block) {
+  GenerateExpressionBranch([&]() { return this->Visit(expression); },
+                           true_block, false_block);
 }
 
 VisitResult ImplementationVisitor::GenerateImplicitConvert(
@@ -2692,6 +2866,48 @@ void ImplementationVisitor::GenerateClassDefinitions(std::string& file_name) {
 
   new_contents_stream
       << "\n#endif  // V8_CLASS_BUILTIN_DEFINITIONS_FROM_DSL_H_\n";
+
+  std::string new_contents(new_contents_stream.str());
+  ReplaceFileContentsIfDifferent(file_name, new_contents);
+}
+
+void ImplementationVisitor::GeneratePrintDefinitions(std::string& file_name) {
+  std::stringstream new_contents_stream;
+
+  new_contents_stream << "#ifdef OBJECT_PRINT\n\n";
+
+  new_contents_stream << "#include \"src/objects.h\"\n\n";
+  new_contents_stream << "#include <iosfwd>\n\n";
+  new_contents_stream << "#include \"src/objects/struct-inl.h\"\n\n";
+
+  new_contents_stream << "namespace v8 {\n";
+  new_contents_stream << "namespace internal {\n\n";
+
+  for (auto i : GlobalContext::GetClasses()) {
+    ClassType* type = i.second;
+    if (!type->ShouldGeneratePrint()) continue;
+
+    new_contents_stream << "void " << type->name() << "::" << type->name()
+                        << "Print(std::ostream& os) {\n";
+    new_contents_stream << "  PrintHeader(os, \"" << type->name() << "\");\n";
+    auto hierarchy = type->GetHierarchy();
+    std::map<std::string, const AggregateType*> field_names;
+    for (const AggregateType* aggregate_type : hierarchy) {
+      for (const Field& f : aggregate_type->fields()) {
+        if (f.name_and_type.name == "map") continue;
+        new_contents_stream << "  os << \"\\n - " << f.name_and_type.name
+                            << ": \" << "
+                            << "Brief(" << f.name_and_type.name << "());\n";
+      }
+    }
+    new_contents_stream << "  os << \"\\n\";\n";
+    new_contents_stream << "}\n\n";
+  }
+
+  new_contents_stream << "}  // namespace internal\"\n";
+  new_contents_stream << "}  // namespace v8\"\n";
+
+  new_contents_stream << "\n#endif  // OBJECT_PRINT\n\n";
 
   std::string new_contents(new_contents_stream.str());
   ReplaceFileContentsIfDifferent(file_name, new_contents);

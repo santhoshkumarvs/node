@@ -160,11 +160,16 @@ Namespace* Declarations::DeclareNamespace(const std::string& name) {
 const AbstractType* Declarations::DeclareAbstractType(
     const Identifier* name, bool transient, std::string generated,
     base::Optional<const AbstractType*> non_constexpr_version,
-    const base::Optional<std::string>& parent) {
+    const base::Optional<Identifier*>& parent) {
   CheckAlreadyDeclared<TypeAlias>(name->value, "type");
   const Type* parent_type = nullptr;
   if (parent) {
-    parent_type = LookupType(QualifiedName{*parent});
+    auto parent_type_alias = LookupTypeAlias(QualifiedName{(*parent)->value});
+    parent_type = parent_type_alias->type();
+    if (GlobalContext::collect_language_server_data()) {
+      LanguageServerData::AddDefinition(
+          (*parent)->pos, parent_type_alias->GetDeclarationPosition());
+    }
   }
   if (generated == "" && parent) {
     generated = parent_type->GetGeneratedTNodeTypeName();
@@ -190,10 +195,10 @@ StructType* Declarations::DeclareStruct(const Identifier* name) {
 
 ClassType* Declarations::DeclareClass(const Type* super_type,
                                       const Identifier* name, bool is_extern,
-                                      bool transient,
+                                      bool generate_print, bool transient,
                                       const std::string& generates) {
   ClassType* new_type = TypeOracle::GetClassType(
-      super_type, name->value, is_extern, transient, generates);
+      super_type, name->value, is_extern, generate_print, transient, generates);
   DeclareType(name, new_type, false);
   return new_type;
 }

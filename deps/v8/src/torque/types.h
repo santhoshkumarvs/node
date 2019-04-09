@@ -25,7 +25,7 @@ static const char* const CONSTEXPR_BOOL_TYPE_STRING = "constexpr bool";
 static const char* const CONSTEXPR_INTPTR_TYPE_STRING = "constexpr intptr";
 static const char* const BOOL_TYPE_STRING = "bool";
 static const char* const VOID_TYPE_STRING = "void";
-static const char* const ARGUMENTS_TYPE_STRING = "constexpr Arguments";
+static const char* const ARGUMENTS_TYPE_STRING = "Arguments";
 static const char* const CONTEXT_TYPE_STRING = "Context";
 static const char* const MAP_TYPE_STRING = "Map";
 static const char* const OBJECT_TYPE_STRING = "Object";
@@ -176,6 +176,7 @@ struct Field {
   NameAndType name_and_type;
   size_t offset;
   bool is_weak;
+  bool const_qualified;
 };
 
 std::ostream& operator<<(std::ostream& os, const Field& name_and_type);
@@ -470,6 +471,7 @@ class ClassType final : public AggregateType {
   std::string GetGeneratedTypeNameImpl() const override;
   std::string GetGeneratedTNodeTypeNameImpl() const override;
   bool IsExtern() const { return is_extern_; }
+  bool ShouldGeneratePrint() const { return generate_print_; }
   bool IsTransient() const override { return transient_; }
   bool HasIndexedField() const override;
   size_t size() const { return size_; }
@@ -489,9 +491,11 @@ class ClassType final : public AggregateType {
  private:
   friend class TypeOracle;
   ClassType(const Type* parent, Namespace* nspace, const std::string& name,
-            bool is_extern, bool transient, const std::string& generates);
+            bool is_extern, bool generate_print, bool transient,
+            const std::string& generates);
 
   bool is_extern_;
+  bool generate_print_;
   bool transient_;
   size_t size_;
   bool has_indexed_field_;
@@ -530,6 +534,8 @@ class VisitResult {
   base::Optional<std::string> constexpr_value_;
   base::Optional<StackRange> stack_range_;
 };
+
+typedef std::map<std::string, VisitResult> NameValueMap;
 
 VisitResult ProjectStructField(VisitResult structure,
                                const std::string& fieldname);

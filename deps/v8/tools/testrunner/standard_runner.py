@@ -46,7 +46,7 @@ VARIANT_ALIASES = {
   # Shortcut for the two above ("more" first - it has the longer running tests).
   "exhaustive": MORE_VARIANTS + VARIANTS,
   # Additional variants, run on a subset of bots.
-  "extra": ["nooptimization", "future", "no_liftoff", "no_wasm_traps"],
+  "extra": ["nooptimization", "future", "no_wasm_traps"],
 }
 
 GC_STRESS_FLAGS = ["--gc-interval=500", "--stress-compaction",
@@ -202,7 +202,7 @@ class StandardTestRunner(base_runner.BaseTestRunner):
       if self.build_config.predictable:
         options.variants = "default"
         options.extra_flags.append("--predictable")
-        options.extra_flags.append("--verify_predictable")
+        options.extra_flags.append("--verify-predictable")
         options.extra_flags.append("--no-inline-new")
         # Add predictable wrapper to command prefix.
         options.command_prefix = (
